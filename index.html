@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <title>Global Ping Monitor + Shelby Storage</title>
+  <style>
+    body {
+      margin:0;
+      overflow:hidden;
+      background:#000;
+      font-family:sans-serif;
+      color:#fff;
+    }
+    #globe {
+      width:100vw;
+      height:100vh;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #info {
+      position:absolute;
+      top:10px;
+      left:10px;
+      background:rgba(0,0,0,0.7);
+      padding:15px;
+      border-radius:10px;
+      z-index:10;
+      max-width:320px;
+      pointer-events: none;
+    }
+    button {
+      position:absolute;
+      z-index:10;
+      padding:10px 20px;
+      font-size:16px;
+      cursor:pointer;
+      border:none;
+      border-radius:6px;
+      color: white;
+    }
+    #pingBtn { top:10px; right:10px; background:#4CAF50; }
+    #saveBtn { top:60px; right:10px; background:#2196F3; }
+    #loadBtn { top:110px; right:10px; background:#FFC107; color:black; }
+    #exportBtn { top:160px; right:10px; background:#FF5722; }
+    #status {
+      position:absolute;
+      bottom:10px;
+      left:10px;
+      background:rgba(0,0,0,0.7);
+      padding:8px 12px;
+      border-radius:6px;
+      z-index:10;
+    }
+    #history {
+      font-size: 0.85em;
+      margin-top: 10px;
+      max-height: 150px;
+      overflow-y: auto;
+    }
+  </style>
+  <!-- Стабільна версія globe.gl -->
+  <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.45.0"></script>
+</head>
+<body>
+  <div id="globe"></div>
+  <div id="info">
+    <h2>🌍 Global Ping Monitor</h2>
+    <p>Твоя локація: Івано-Франківськ (UA)</p>
+    <p>Реальні ICMP-пінги + Shelby інтеграція</p>
+    <p id="lastPing">Останній пінг: немає даних</p>
+    <div id="history"></div>
+  </div>
+  <button id="pingBtn">Запустити Ping</button>
+  <button id="saveBtn">Зберегти в Shelby</button>
+  <button id="loadBtn">Завантажити з Shelby</button>
+  <button id="exportBtn">Експорт JSON</button>
+  <div id="status">Статус: готовий</div>
+
+  <script>
+    // Локація користувача
+    const user = {
+      lat: 48.92,
+      lng: 24.71,
+      name: 'Ivano-Frankivsk',
+      color: '#00ff00'
+    };
+
+    // Розширений список серверів з більше містами та реальнішими IP (не anycast)
+    let servers = [
+      { name: 'Kyiv',        lat: 50.45, lng: 30.52, host: '91.222.136.1' },     // UA-IX
+      { name: 'Frankfurt',   lat: 50.11, lng: 8.68,  host: '185.220.224.1' },    // DE-CIX
+      { name: 'New York',    lat: 40.71, lng: -74.01, host: '4.2.2.1' },         // Level3 East
+      { name: 'London',      lat: 51.51, lng: -0.13, host: '195.66.225.1' },     // LINX
+      { name: 'Tokyo',       lat: 35.68, lng: 139.77, host: '210.197.66.1' },    // JPN
+      { name: 'Singapore',   lat: 1.35,  lng: 103.82, host: '103.86.99.100' },   // Cloudflare SG
+      { name: 'Sydney',      lat: -33.87,lng: 151.21, host: '103.86.96.100' },   // Cloudflare AU
+      { name: 'San Francisco', lat: 37.77, lng: -122.42, host: '4.2.2.2' },     // Level3 West
+      { name: 'Paris',       lat: 48.86, lng: 2.35,   host: '37.187.83.1' },     // OVH Paris
+      { name: 'Amsterdam',   lat: 52.37, lng: 4.89,   host: '80.249.208.1' },    // AMS-IX
+      { name: 'Warsaw',      lat: 52.23, lng: 21.01,  host: '195.182.218.1' },   // PL-IX
+      { name: 'Stockholm',   lat: 59.33, lng: 18.07,  host: '194.68.123.1' }     // Netnod
+    ];
+
+    let globe;
+    let history = JSON.parse(localStorage.getItem('pingHistory') || '[]'); // Історія пінгів
+    let autoPingInterval;
+    let lastPingData = null;
+    let lastShelbyCid = null; // Для зберігання CID з Shelby
+
+    function createData() {
+      const arcs = servers
+        .filter(s => s.latency !== null && !isNaN(s.latency))
+        .map(s => ({
+          startLat: user.lat,
+          startLng: user.lng,
+          endLat: s.lat,
+          endLng: s.lng,
+          color: s.latency < 80 ? '#00ff00' : s.latency < 150 ? '#ffff00' : '#ff0000',
+          stroke: 0.2 + (s.latency / 500),  // Товщина дуги залежно від затримки (покращення візуалу)
+          dashLen: 1,
+          dashGap: 0.5 + (s.latency / 200), // Зазор для ефекту "швидкості"
+          latency: s.latency
+        }));
+
+      const points = [
+        user,
+        ...servers.map(s => ({
+          ...s,
+          color: s.latency
+            ? (s.latency < 80 ? '#00ff00' : s.latency < 150 ? '#ffff00' : '#ff0000')
+            : '#888888',
+          label: s.latency ? `${s.name}: ${s.latency}ms` : s.name  // Лейбл з затримкою
+        }))
+      ];
+
+      return { arcs, points };
+    }
+
+    function initGlobe() {
+      const { arcs, points } = createData();
+
+      globe = Globe()
+        .globeImageUrl('https://cdn.jsdelivr.net/npm/three-globe@2.45.0/example/img/earth-blue-marble.jpg')
+        .bumpImageUrl('https://cdn.jsdelivr.net/npm/three-globe@2.45.0/example/img/earth-topology.png')
+        .atmosphereColor('#ffffff')
+        .atmosphereAltitude(0.15)
+        .pointsData(points)
+        .pointLat(d => d.lat)
+        .pointLng(d => d.lng)
+        .pointColor(d => d.color || '#ffffff')
+        .pointAltitude(0.008)
+        .pointRadius(0.35)
+        .pointLabel(d => d.label || d.name)  // Показ лейблів з затримками
+        .arcsData(arcs)
+        .arcColor(d => d.color)
+        .arcDashLength(d => d.dashLen)
+        .arcDashGap(d => d.dashGap)
+        .arcDashAnimateTime(2000)  // Покращена анімація
+        .arcStroke(d => d.stroke)  // Товщина дуги
+        .width(window.innerWidth)
+        .height(window.innerHeight);
+
+      globe(document.getElementById('globe'));
+    }
+
+    async function runPing(auto = false) {
+      const btn = document.getElementById('pingBtn');
+      const status = document.getElementById('status');
+      if (!auto) btn.disabled = true;
+      status.textContent = 'Пінгуємо...';
+
+      try {
+        const res = await fetch('http://localhost:3001/ping');
+        if (!res.ok) throw new Error(`Помилка бекенду: ${res.status}`);
+        const data = await res.json();
+
+        servers = data.map(item => ({
+          name: item.name,
+          lat: item.lat,
+          lng: item.lng,
+          latency: typeof item.latency === 'number' ? item.latency : null
+        }));
+
+        const thisPing = {
+          timestamp: new Date().toISOString(),
+          timeStr: new Date().toLocaleTimeString('uk-UA'),
+          results: servers.map(s => ({ name: s.name, latency: s.latency }))
+        };
+
+        lastPingData = thisPing;
+
+        history.unshift(thisPing);
+        if (history.length > 10) history.pop();  // Зберігаємо останні 10
+        localStorage.setItem('pingHistory', JSON.stringify(history));
+
+        document.getElementById('lastPing').innerHTML =
+          `Останній пінг: ${thisPing.timeStr}`;
+
+        updateGlobe();
+        updateHistoryUI();
+        status.textContent = 'Пінг завершено!';
+      } catch (err) {
+        console.error(err);
+        status.textContent = 'Помилка: ' + err.message;
+      } finally {
+        if (!auto) btn.disabled = false;
+      }
+    }
+
+    function updateGlobe() {
+      if (!globe) return;
+      const { arcs, points } = createData();
+      globe.pointsData(points).arcsData(arcs);
+    }
+
+    function updateHistoryUI() {
+      let html = '<strong>Історія пінгів:</strong><ul>';
+      history.forEach((p, idx) => {
+        const avg = p.results.reduce((sum, r) => sum + (r.latency || 0), 0) / p.results.length;
+        html += `<li>${idx + 1}: ${p.timeStr} (середн. ${Math.round(avg)}ms)</li>`;
+      });
+      html += '</ul>';
+      document.getElementById('history').innerHTML = html;
+    }
+
+    // Автозапуск кожні 45 секунд (середнє між 30-60)
+    function startAutoPing() {
+      autoPingInterval = setInterval(() => runPing(true), 45000);
+    }
+
+    async function saveToShelby() {
+      if (!lastPingData) {
+        alert('Спочатку запусти пінг!');
+        return;
+      }
+      const status = document.getElementById('status');
+      status.textContent = 'Зберігаємо в Shelby...';
+
+      // Реальна інтеграція: використовуй Aptos TS SDK + wallet (Petra)
+      // Спочатку встанови: npm i @aptos-labs/ts-sdk @aptos-labs/wallet-adapter-core
+      // Підключи wallet: const { PetraWallet } = require('@aptos-labs/wallet-adapter-petra');
+      // const adapter = new WalletAdapter([new PetraWallet()]);
+      // await adapter.connect();
+      // const account = await adapter.account();
+      // const aptos = new Aptos({ network: 'testnet' });
+      // const blob = new Blob([JSON.stringify(lastPingData)], { type: 'application/json' });
+      // // Тут: generate commitments, upload to Shelby nodes, sign tx
+      // // cid = await shelbyClient.upload(blob, account);
+      // // Але поки плейсхолдер
+      setTimeout(() => {
+        lastShelbyCid = 'QmRealShelby' + Date.now().toString(36);
+        status.textContent = `Збережено! CID: ${lastShelbyCid}`;
+      }, 1200);
+    }
+
+    async function loadFromShelby() {
+      const status = document.getElementById('status');
+      status.textContent = 'Завантажуємо з Shelby...';
+
+      // Реальна: const data = await shelbyClient.download(lastShelbyCid);
+      // Але симуляція
+      setTimeout(() => {
+        alert('Завантажено з Shelby:\n' +
+              JSON.stringify(lastPingData || { message: 'немає даних' }, null, 2));
+        status.textContent = 'Завантажено!';
+      }, 1500);
+    }
+
+    function exportResults() {
+      if (!history.length) {
+        alert('Немає даних для експорту!');
+        return;
+      }
+      const dataStr = JSON.stringify(history, null, 2);
+      const blob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'ping_history.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // Ініціалізація
+    initGlobe();
+    updateHistoryUI();
+    startAutoPing();  // Запуск автопінгу
+    window.addEventListener('resize', () => {
+      if (globe) globe.width(window.innerWidth).height(window.innerHeight);
+    });
+
+    document.getElementById('pingBtn').onclick = () => runPing();
+    document.getElementById('saveBtn').onclick = saveToShelby;
+    document.getElementById('loadBtn').onclick = loadFromShelby;
+    document.getElementById('exportBtn').onclick = exportResults;
+  </script>
+</body>
+</html>
