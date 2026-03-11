@@ -1,205 +1,31 @@
 <!DOCTYPE html>
 <html lang="uk">
 <head>
-  <meta charset="utf-8">
-  <title>Global Ping Monitor + Shelby Storage</title>
-  <style>
-    body { margin:0; overflow:hidden; background:#000; font-family:sans-serif; color:#fff; }
-    #globe { width:100vw; height:100vh; position:absolute; top:0; left:0; }
-    #info { position:absolute; top:10px; left:10px; background:rgba(0,0,0,0.7); padding:15px; border-radius:10px; z-index:10; max-width:320px; pointer-events:none; }
-    button { position:absolute; z-index:10; padding:10px 20px; font-size:16px; cursor:pointer; border:none; border-radius:6px; color:white; }
-    #pingBtn { top:10px; right:10px; background:#4CAF50; }
-    #walletBtn { top:60px; right:10px; background:#9C27B0; }
-    #saveBtn { top:110px; right:10px; background:#2196F3; }
-    #loadBtn { top:160px; right:10px; background:#FFC107; color:black; }
-    #exportBtn { top:210px; right:10px; background:#FF5722; }
-    #status { position:absolute; bottom:10px; left:10px; background:rgba(0,0,0,0.7); padding:8px 12px; border-radius:6px; z-index:10; }
-    #history { font-size:0.85em; margin-top:10px; max-height:150px; overflow-y:auto; }
-    #walletStatus { font-size:0.9em; color:#ccc; margin-top:5px; }
-  </style>
-  <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.45.0"></script>
-  <!-- Petra Wallet Adapter (підключаємо CDN для простоти, пізніше можна npm) -->
-  <script src="https://unpkg.com/@aptos-labs/wallet-adapter@latest/dist/umd/index.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Global Ping Monitor</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/three"></script>
+  <script src="https://unpkg.com/globe.gl"></script>
 </head>
 <body>
-  <div id="globe"></div>
-  <div id="info">
-    <h2>🌍 Global Ping Monitor</h2>
-    <p>Твоя локація: Івано-Франківськ (UA)</p>
-    <p>Реальні ICMP-пінги + підготовка до Shelby (Aptos testnet)</p>
-    <p id="lastPing">Останній пінг: немає даних</p>
-    <div id="walletStatus">Wallet: не підключено</div>
-    <div id="history"></div>
+  <h1>🌍 Global Ping Monitor</h1>
+
+  <p id="location">Твоя локація: визначається...</p>
+  <p id="ping">Останній пінг: немає даних</p>
+  <p id="wallet">Wallet: не підключено</p>
+
+  <div id="globeViz"></div>
+
+  <div class="controls">
+    <button onclick="runPing()">Запустити Ping</button>
+    <button onclick="connectWallet()">Підключити Petra Wallet</button>
+    <button onclick="saveToShelby()">Зберегти в Shelby</button>
+    <button onclick="exportJSON()">Експорт JSON</button>
   </div>
-  <button id="pingBtn">Запустити Ping</button>
-  <button id="walletBtn">Підключити Petra Wallet</button>
-  <button id="saveBtn">Зберегти в Shelby</button>
-  <button id="loadBtn">Завантажити з Shelby</button>
-  <button id="exportBtn">Експорт JSON</button>
-  <div id="status">Статус: готовий</div>
 
-  <script>
-    // Локація користувача
-    const user = { lat: 48.92, lng: 24.71, name: 'Ivano-Frankivsk', color: '#00ff00' };
+  <p id="status">Статус: готовий</p>
 
-    // Сервери (розширений список)
-    let servers = [
-      { name: 'Kyiv',        lat: 50.45, lng: 30.52, latency: null },
-      { name: 'Frankfurt',   lat: 50.11, lng: 8.68,   latency: null },
-      { name: 'New York',    lat: 40.71, lng: -74.01, latency: null },
-      { name: 'London',      lat: 51.51, lng: -0.13,  latency: null },
-      { name: 'Tokyo',       lat: 35.68, lng: 139.77, latency: null },
-      { name: 'Singapore',   lat:  1.35, lng: 103.82, latency: null },
-      { name: 'Sydney',      lat:-33.87, lng: 151.21, latency: null },
-      { name: 'San Francisco', lat: 37.77, lng:-122.42, latency: null },
-      { name: 'Paris',       lat: 48.86, lng: 2.35,   latency: null },
-      { name: 'Amsterdam',   lat: 52.37, lng: 4.89,   latency: null }
-    ];
-
-    let globe;
-    let history = JSON.parse(localStorage.getItem('pingHistory') || '[]');
-    let lastPingData = null;
-    let lastShelbyCid = null;
-    let walletConnected = false;
-    let aptosAccount = null;
-
-    function createData() {
-      const arcs = servers
-        .filter(s => s.latency !== null && !isNaN(s.latency))
-        .map(s => ({
-          startLat: user.lat, startLng: user.lng,
-          endLat: s.lat, endLng: s.lng,
-          color: s.latency < 80 ? '#00ff00' : s.latency < 150 ? '#ffff00' : '#ff0000',
-          latency: s.latency
-        }));
-
-      const points = [user, ...servers.map(s => ({
-        ...s,
-        color: s.latency ? (s.latency < 80 ? '#00ff00' : s.latency < 150 ? '#ffff00' : '#ff0000') : '#888888',
-        label: s.latency ? `${s.name}: ${s.latency}ms` : s.name
-      }))];
-
-      return { arcs, points };
-    }
-
-    function initGlobe() {
-      const { arcs, points } = createData();
-      globe = Globe()
-        .globeImageUrl('https://cdn.jsdelivr.net/npm/three-globe@2.45.0/example/img/earth-blue-marble.jpg')
-        .bumpImageUrl('https://cdn.jsdelivr.net/npm/three-globe@2.45.0/example/img/earth-topology.png')
-        .atmosphereColor('#ffffff')
-        .atmosphereAltitude(0.15)
-        .pointsData(points)
-        .pointLat(d => d.lat)
-        .pointLng(d => d.lng)
-        .pointColor(d => d.color || '#ffffff')
-        .pointAltitude(0.008)
-        .pointRadius(0.35)
-        .pointLabel(d => d.label)
-        .arcsData(arcs)
-        .arcColor(d => d.color)
-        .arcDashLength(0.9)
-        .arcDashGap(2)
-        .arcDashAnimateTime(1400)
-        .arcStroke(0.5)
-        .width(window.innerWidth)
-        .height(window.innerHeight);
-      globe(document.getElementById('globe'));
-    }
-
-    async function runPing() {
-      // ... (та сама функція runPing як раніше, без змін)
-      // Після успішного пінгу викликаємо updateGlobe() і updateHistoryUI()
-    }
-
-    function updateGlobe() {
-      if (!globe) return;
-      const { arcs, points } = createData();
-      globe.pointsData(points).arcsData(arcs);
-    }
-
-    function updateHistoryUI() {
-      // ... (та сама функція як раніше)
-    }
-
-    // Підключення Petra Wallet
-    async function connectWallet() {
-      const status = document.getElementById('status');
-      const walletStatus = document.getElementById('walletStatus');
-      status.textContent = 'Підключаємо wallet...';
-
-      try {
-        if (!window.aptos) {
-          throw new Error('Petra Wallet не встановлено. Встановіть розширення Petra.');
-        }
-
-        await window.aptos.connect();
-        const account = await window.aptos.account();
-        aptosAccount = account;
-        walletConnected = true;
-
-        walletStatus.textContent = `Wallet: підключено (${account.address.slice(0,6)}...${account.address.slice(-4)})`;
-        walletStatus.style.color = '#4CAF50';
-        status.textContent = 'Wallet підключено!';
-      } catch (err) {
-        console.error(err);
-        walletStatus.textContent = 'Wallet: помилка';
-        walletStatus.style.color = '#f44336';
-        status.textContent = 'Помилка підключення: ' + err.message;
-      }
-    }
-
-    async function saveToShelby() {
-      if (!lastPingData) {
-        alert('Спочатку запусти пінг!');
-        return;
-      }
-      if (!walletConnected) {
-        alert('Спочатку підключіть Petra Wallet!');
-        return;
-      }
-
-      const status = document.getElementById('status');
-      status.textContent = 'Зберігаємо в Shelby (підготовка до testnet)...';
-
-      try {
-        const jsonString = JSON.stringify(lastPingData);
-        const blob = new Blob([jsonString], { type: 'application/json' });
-
-        // Місце для реального Shelby upload після апруву
-        /*
-        // Приклад після отримання SDK:
-        const aptos = new Aptos({ network: 'testnet' });
-        const shelbyClient = new ShelbyClient({ aptos, account: aptosAccount });
-        const commitments = await shelbyClient.generateCommitments(blob);
-        const cid = await shelbyClient.upload(blob, {
-          filename: `ping-${Date.now()}.json`,
-          commitments
-        });
-        lastShelbyCid = cid;
-        */
-
-        // Симуляція з "реалістичними" елементами
-        await new Promise(r => setTimeout(r, 1800)); // симуляція затримки tx
-        lastShelbyCid = 'QmShelbyTest' + Date.now().toString(36);
-        status.textContent = `Збережено (симуляція testnet)! CID: ${lastShelbyCid}`;
-        alert(`Дані збережено!\nCID: ${lastShelbyCid}\n(після апруву це буде реальний verifiable upload)`);
-      } catch (err) {
-        status.textContent = 'Помилка: ' + err.message;
-      }
-    }
-
-    // ... решта функцій (loadFromShelby, exportResults тощо) без змін
-
-    // Ініціалізація
-    initGlobe();
-    updateHistoryUI();
-    window.addEventListener('resize', () => globe?.width(window.innerWidth).height(window.innerHeight));
-
-    document.getElementById('pingBtn').onclick = runPing;
-    document.getElementById('walletBtn').onclick = connectWallet;
-    document.getElementById('saveBtn').onclick = saveToShelby;
-    // інші кнопки...
-  </script>
+  <script src="app.js"></script>
 </body>
 </html>
