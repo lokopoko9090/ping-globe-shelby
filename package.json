@@ -1,7 +1,11 @@
 {
+  "name": "ping-globe-shelby",
+  "version": "1.0.0",
+  "type": "module",
   "dependencies": {
-    "cors": "^2.8.6",
-    "express": "^5.2.1",
-    "ping": "^1.0.0"
+    "ping": "^0.4.4"
+  },
+  "scripts": {
+    "dev": "serve ."
   }
 }
